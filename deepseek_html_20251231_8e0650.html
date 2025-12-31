@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Cloud ✌️</title>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getDatabase, ref, push, onValue, remove } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA5Pve-_wkkqSumRY5iv1bCkQYJMO5QaGA",
+  authDomain: "file-management-6ffd6.firebaseapp.com",
+  databaseURL: "https://file-management-6ffd6-default-rtdb.firebaseio.com",
+  projectId: "file-management-6ffd6",
+  appId: "1:431663892824:web:c062471d89ec112ac77d2d"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+const auth = getAuth(app);
+
+signInAnonymously(auth);
+
+const filesRef = ref(db, "files");
+let allFiles = [];
+const MAX_STORAGE = 1024 * 1024 * 1024; // 1GB
+let pendingFiles = [];
+
+// Upload with progress
+window.uploadFiles = (files) => {
+  [...files].forEach(file => {
+    if (file.size > 5 * 1024 * 1024) {
+      alert(`${file.name} is too large (max 5MB per file)`);
+      return;
+    }
+
+    const reader = new FileReader();
+    const startTime = Date.now();
+
+    reader.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const percent = Math.round((e.loaded / e.total) * 100);
+        document.getElementById("uploadProgress").style.width = percent + "%";
+        document.getElementById("progressContainer").style.display = "block";
+        
+        const elapsed = (Date.now() - startTime) / 1000;
+        const speed = e.loaded / elapsed;
+        const remaining = (e.total - e.loaded) / speed;
+        document.getElementById("eta").innerText = `⏱ ${remaining.toFixed(1)}s remaining`;
+      }
+    };
+
+    reader.onload = () => {
+      push(filesRef, {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        date: Date.now(),
+        data: reader.result
+      });
+      document.getElementById("uploadProgress").style.width = "100%";
+      setTimeout(() => {
+        document.getElementById("uploadProgress").style.width = "0%";
+        document.getElementById("eta").innerText = "";
+        document.getElementById("progressContainer").style.display = "none";
+      }, 1000);
+    };
+
+    reader.readAsDataURL(file);
+  });
+};
+
+// Show selected files and upload button
+window.showSelectedFiles = (files) => {
+  pendingFiles = [...files];
+  const filesList = document.getElementById("filesList");
+  const selectedSection = document.getElementById("selectedFiles");
+  const countSpan = document.getElementById("selectedFileCount"); // FIXED: Changed from "fileCount"
+  
+  filesList.innerHTML = "";
+  
+  if (files.length === 0) {
+    selectedSection.style.display = "none";
+    return;
+  }
+  
+  selectedSection.style.display = "block";
+  countSpan.innerText = files.length;
+  
+  [...files].forEach(file => {
+    const fileItem = document.createElement("div");
+    fileItem.style.cssText = "padding: 8px; background: #f3f4f6; margin-bottom: 5px; border-radius: 8px; font-size: 14px;";
+    fileItem.innerHTML = `📄 ${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+    filesList.appendChild(fileItem);
+  });
+};
+
+// Confirm upload
+window.confirmUpload = () => {
+  if (pendingFiles.length > 0) {
+    uploadFiles(pendingFiles);
+    pendingFiles = [];
+    document.getElementById("selectedFiles").style.display = "none";
+    document.getElementById("fileInput").value = "";
+    document.getElementById("folderInput").value = "";
+  }
+};
+
+// File input handler
+document.addEventListener('DOMContentLoaded', () => {
+  const fileInput = document.getElementById("fileInput");
+  const folderInput = document.getElementById("folderInput");
+  
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) {
+      showSelectedFiles(e.target.files);
+    }
+  });
+
+  folderInput.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) {
+      showSelectedFiles(e.target.files);
+    }
+  });
+
+  // Drag and drop
+  const dropZone = document.getElementById("dropZone");
+  
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.style.borderColor = "#8b5cf6";
+    dropZone.style.background = "#f5f3ff";
+  });
+
+  dropZone.addEventListener('dragleave', () => {
+    dropZone.style.borderColor = "#e5e7eb";
+    dropZone.style.background = "white";
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.style.borderColor = "#e5e7eb";
+    dropZone.style.background = "white";
+    
+    // Handle both files and folders from drag & drop
+    const items = e.dataTransfer.items;
+    if (items) {
+      const files = [];
+      let processedItems = 0;
+      
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i].webkitGetAsEntry();
+        if (item) {
+          if (item.isFile) {
+            items[i].getAsFile() && files.push(items[i].getAsFile());
+            processedItems++;
+            if (processedItems === items.length) {
+              showSelectedFiles(files);
+            }
+          } else if (item.isDirectory) {
+            readDirectory(item, files, () => {
+              processedItems++;
+              if (processedItems === items.length) {
+                showSelectedFiles(files);
+              }
+            });
+          }
+        }
+      }
+    } else {
+      showSelectedFiles(e.dataTransfer.files);
+    }
+  });
+});
+
+// Read directory recursively for drag & drop
+function readDirectory(dirEntry, filesList, callback) {
+  const dirReader = dirEntry.createReader();
+  dirReader.readEntries((entries) => {
+    let entriesProcessed = 0;
+    if (entries.length === 0) {
+      callback && callback();
+      return;
+    }
+    
+    entries.forEach((entry) => {
+      if (entry.isFile) {
+        entry.file((file) => {
+          filesList.push(file);
+          entriesProcessed++;
+          if (entriesProcessed === entries.length) {
+            callback && callback();
+          }
+        });
+      } else if (entry.isDirectory) {
+        readDirectory(entry, filesList, () => {
+          entriesProcessed++;
+          if (entriesProcessed === entries.length) {
+            callback && callback();
+          }
+        });
+      }
+    });
+  });
+}
+
+// Download
+window.downloadFile = (data, name) => {
+  const a = document.createElement("a");
+  a.href = data;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+};
+
+// Delete
+window.deleteFile = (id) => {
+  if (confirm("Delete this file?")) {
+    remove(ref(db, "files/" + id));
+  }
+};
+
+// Search
+window.searchFiles = (query) => {
+  const filtered = allFiles.filter(f => 
+    f.name.toLowerCase().includes(query.toLowerCase())
+  );
+  renderFiles(filtered);
+};
+
+// Sort
+window.sortFiles = (type) => {
+  let sorted = [...allFiles];
+  if (type === "name") sorted.sort((a,b) => a.name.localeCompare(b.name));
+  if (type === "size") sorted.sort((a,b) => b.size - a.size);
+  if (type === "date") sorted.sort((a,b) => b.date - a.date);
+  renderFiles(sorted);
+};
+
+// Render files
+function renderFiles(files) {
+  const container = document.getElementById("filesContainer");
+  container.innerHTML = "";
+
+  if (files.length === 0) {
+    container.innerHTML = '<p style="text-align:center;color:#999;padding:40px;">No files yet</p>';
+    return;
+  }
+
+  files.forEach(f => {
+    const card = document.createElement("div");
+    card.className = "file-card";
+    
+    const icon = f.type.startsWith("image") ? "🖼️" :
+                 f.type.includes("pdf") ? "📄" :
+                 f.type.includes("video") ? "🎥" :
+                 f.type.includes("audio") ? "🎵" : "📁";
+
+    const date = new Date(f.date).toLocaleDateString();
+    
+    card.innerHTML = `
+      <div class="file-icon">${icon}</div>
+      <div class="file-info">
+        <div class="file-name" title="${f.name}">${f.name}</div>
+        <div class="file-meta">${(f.size/1024).toFixed(1)} KB • ${date}</div>
+      </div>
+      <div class="file-actions">
+        <button onclick="downloadFile('${f.data}','${f.name}')" title="Download">⬇️</button>
+        <button onclick="deleteFile('${f.id}')" class="delete-btn" title="Delete">🗑️</button>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+// Load files
+onValue(filesRef, (snapshot) => {
+  allFiles = [];
+  let totalSize = 0;
+  
+  snapshot.forEach((child) => {
+    const file = { id: child.key, ...child.val() };
+    allFiles.push(file);
+    totalSize += file.data.length;
+  });
+
+  // Update UI
+  document.getElementById("fileCount").innerText = `${allFiles.length} Files`; // FIXED: More descriptive
+  document.getElementById("storageUsed").innerText = 
+    `${(totalSize / 1024 / 1024).toFixed(1)} MB of ${(MAX_STORAGE / 1024 / 1024).toFixed(0)} MB used`;
+  
+  const percent = Math.min((totalSize / MAX_STORAGE) * 100, 100);
+  document.getElementById("storageBar").style.width = percent + "%";
+
+  renderFiles(allFiles.sort((a,b) => b.date - a.date));
+});
+</script>
+
+<style>
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: linear-gradient(135deg, #f5f7fa 0%, #e8eaf6 100%);
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+}
+
+.header h1 {
+  font-size: 28px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.search-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: white;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.cloud-card {
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+  border-radius: 24px;
+  padding: 30px;
+  color: white;
+  box-shadow: 0 10px 30px rgba(139, 92, 246, 0.3);
+  margin-bottom: 30px;
+  position: relative;
+  overflow: hidden;
+}
+
+.cloud-icon {
+  width: 80px;
+  height: 60px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 50%;
+  position: absolute;
+  right: 30px;
+  top: 30px;
+}
+
+.cloud-icon::before {
+  content: "☁️";
+  font-size: 40px;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.cloud-card h2 {
+  font-size: 20px;
+  margin-bottom: 10px;
+  font-weight: 500;
+}
+
+.cloud-info {
+  font-size: 14px;
+  opacity: 0.9;
+  margin-bottom: 15px;
+}
+
+.storage-bar {
+  height: 8px;
+  background: rgba(255,255,255,0.3);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-top: 15px;
+}
+
+.storage-bar-fill {
+  height: 100%;
+  background: white;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.upload-section {
+  background: white;
+  border-radius: 20px;
+  padding: 30px;
+  margin-bottom: 30px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+.drop-zone {
+  border: 2px dashed #e5e7eb;
+  border-radius: 16px;
+  padding: 40px;
+  text-align: center;
+  background: white;
+  transition: all 0.3s ease;
+}
+
+.drop-zone:hover {
+  border-color: #8b5cf6;
+  background: #f5f3ff;
+}
+
+.drop-zone p {
+  color: #6b7280;
+  margin-bottom: 20px;
+  font-size: 16px;
+}
+
+.upload-buttons {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.upload-btn {
+  background: #8b5cf6;
+  color: white;
+  border: none;
+  padding: 12px 30px;
+  border-radius: 12px;
+  font-size: 15px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.upload-btn:hover {
+  background: #7c3aed;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+}
+
+.folder-btn {
+  background: #6366f1;
+}
+
+.folder-btn:hover {
+  background: #4f46e5;
+}
+
+.confirm-btn {
+  background: #10b981;
+  font-size: 16px;
+  padding: 14px 40px;
+}
+
+.confirm-btn:hover {
+  background: #059669;
+}
+
+.progress-container {
+  margin-top: 15px;
+  display: none;
+}
+
+.progress-bar {
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #8b5cf6;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+#eta {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.controls input {
+  flex: 1;
+  min-width: 200px;
+  padding: 12px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  font-size: 14px;
+}
+
+.controls select {
+  padding: 12px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  font-size: 14px;
+  cursor: pointer;
+  background: white;
+}
+
+.files-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+}
+
+.file-card {
+  background: white;
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.file-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+}
+
+.file-icon {
+  font-size: 36px;
+  flex-shrink: 0;
+}
+
+.file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-name {
+  font-weight: 500;
+  color: #1f2937;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-meta {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.file-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.file-actions button {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 8px;
+  background: #f3f4f6;
+  cursor: pointer;
+  font-size: 16px;
+  transition: all 0.2s ease;
+}
+
+.file-actions button:hover {
+  background: #e5e7eb;
+  transform: scale(1.1);
+}
+
+.delete-btn:hover {
+  background: #fee2e2 !important;
+}
+
+@media (max-width: 768px) {
+  .container {
+    padding: 10px;
+  }
+
+  .header h1 {
+    font-size: 24px;
+  }
+
+  .cloud-card {
+    padding: 20px;
+  }
+
+  .files-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .controls {
+    flex-direction: column;
+  }
+
+  .controls input {
+    min-width: 100%;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  .files-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+input[type="file"] {
+  display: none;
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+  
+  <div class="header">
+    <h1>My Cloud ✌️</h1>
+    <button class="search-btn" onclick="document.getElementById('searchInput').focus()">🔍</button>
+  </div>
+
+  <div class="cloud-card">
+    <div class="cloud-icon"></div>
+    <h2>RTDB Storage</h2>
+    <div class="cloud-info">
+      <div id="fileCount">0 Files</div>
+      <div>🔄 Sync active</div>
+    </div>
+    <div id="storageUsed">0 MB of 1024 MB used</div>
+    <div class="storage-bar">
+      <div class="storage-bar-fill" id="storageBar"></div>
+    </div>
+  </div>
+
+  <div class="upload-section">
+    <div class="drop-zone" id="dropZone">
+      <p>📤 Drag & Drop files or folders here</p>
+      <div class="upload-buttons">
+        <button class="upload-btn" type="button" onclick="document.getElementById('fileInput').click()">
+          📄 Choose Files
+        </button>
+        <button class="upload-btn folder-btn" type="button" onclick="document.getElementById('folderInput').click()">
+          📁 Choose Folder
+        </button>
+      </div>
+      <input type="file" id="fileInput" multiple>
+      <input type="file" id="folderInput" webkitdirectory directory multiple>
+      
+      <div id="selectedFiles" style="display:none; margin-top: 20px;">
+        <div id="filesList" style="text-align: left; margin-bottom: 15px; max-height: 150px; overflow-y: auto;"></div>
+        <!-- FIXED: Changed id from "fileCount" to "selectedFileCount" -->
+        <button class="upload-btn confirm-btn" type="button" onclick="confirmUpload()">
+          ⬆️ Upload Now (<span id="selectedFileCount">0</span> files)
+        </button>
+      </div>
+    </div>
+    <div class="progress-container" id="progressContainer">
+      <div class="progress-bar">
+        <div class="progress-fill" id="uploadProgress"></div>
+      </div>
+      <div id="eta"></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <input type="text" id="searchInput" placeholder="🔍 Search files..." oninput="searchFiles(this.value)">
+    <select onchange="sortFiles(this.value)">
+      <option value="date">Sort by Date</option>
+      <option value="name">Sort by Name</option>
+      <option value="size">Sort by Size</option>
+    </select>
+  </div>
+
+  <h3 style="margin-bottom: 20px; color: #1f2937; font-size: 20px;">Files</h3>
+  <div class="files-grid" id="filesContainer">
+    <p style="text-align:center;color:#999;padding:40px;grid-column:1/-1;">No files yet. Upload your first file!</p>
+  </div>
+
+</div>
+</body>
+</html>
